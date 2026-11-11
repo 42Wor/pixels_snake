@@ -13,15 +13,24 @@ const GRID_WIDTH: u32 = 240;
 const GRID_HEIGHT: u32 = 240;
 const WINDOW_WIDTH: f64 = 600.0;
 const WINDOW_HEIGHT: f64 = 600.0;
-const TICK_RATE: Duration = Duration::from_millis(110);
+const TICK_RATE: Duration = Duration::from_millis(90);
 
-// Size of each grid cell in pixels (4 = 60x60 grid; change to 2 or 1 for even smaller!)
+// Size of each grid cell (4 = 60x60 grid)
 const CELL_SIZE: u32 = 4;
 const COLS: u32 = GRID_WIDTH / CELL_SIZE;
 const ROWS: u32 = GRID_HEIGHT / CELL_SIZE;
 
-// Number of random obstacles on the map
 const NUM_OBSTACLES: usize = 25;
+
+// --- Color Palette (RGBA) ---
+const COLOR_BG: [u8; 4] = [18, 20, 26, 255]; // Deep dark navy
+const COLOR_BORDER_NORMAL: [u8; 4] = [120, 125, 140, 255]; // Cool slate border
+const COLOR_BORDER_DEAD: [u8; 4] = [235, 77, 75, 255]; // Crimson red on death
+const COLOR_OBSTACLE: [u8; 4] = [108, 92, 231, 255]; // Electric Indigo / Slate Blue
+const COLOR_FOOD: [u8; 4] = [255, 71, 87, 255]; // Bright Coral Apple
+const COLOR_SNAKE_HEAD: [u8; 4] = [46, 213, 115, 255]; // Neon Mint Green
+const COLOR_SNAKE_BODY: [u8; 4] = [38, 166, 91, 255]; // Forest Green
+const COLOR_SNAKE_DEAD: [u8; 4] = [140, 45, 45, 255]; // Dim Red
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct Point {
@@ -29,7 +38,7 @@ struct Point {
     y: u32,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Direction {
     Up,
     Down,
@@ -102,7 +111,6 @@ impl Game {
         }
     }
 
-    /// Resets the game and rolls new random obstacles
     fn reset(&mut self) {
         let start_x = COLS / 2;
         let start_y = ROWS / 2;
@@ -121,7 +129,7 @@ impl Game {
             y: start_y,
         });
 
-        // Generate brand new random obstacles on restart
+        // Brand new obstacles on every restart
         self.obstacles = Self::generate_obstacles(&self.snake);
         self.food = Self::spawn_food(&self.snake, &self.obstacles);
 
@@ -142,12 +150,11 @@ impl Game {
                 y: rng.gen_range(1..ROWS - 1),
             };
 
-            // Avoid spawning on top of the snake
             if snake.contains(&candidate) || obstacles.contains(&candidate) {
                 continue;
             }
 
-            // Safety zone: don't spawn right in front of the snake's starting position
+            // Safe runway for snake spawn
             let dist_x = (candidate.x as i32 - head.x as i32).abs();
             let dist_y = (candidate.y as i32 - head.y as i32).abs();
             if dist_x <= 5 && dist_y <= 3 {
@@ -168,7 +175,6 @@ impl Game {
                 y: rng.gen_range(1..ROWS - 1),
             };
 
-            // Food cannot spawn on snake segments or obstacles
             if !snake.contains(&candidate) && !obstacles.contains(&candidate) {
                 return candidate;
             }
@@ -190,7 +196,7 @@ impl Game {
         // 1. Wall Collision
         if next_x <= 0 || next_x >= (COLS as i32 - 1) || next_y <= 0 || next_y >= (ROWS as i32 - 1)
         {
-            self.trigger_game_over();
+            self.game_over = true;
             return;
         }
 
@@ -201,7 +207,7 @@ impl Game {
 
         // 2. Obstacle Collision
         if self.obstacles.contains(&new_head) {
-            self.trigger_game_over();
+            self.game_over = true;
             return;
         }
 
@@ -220,11 +226,11 @@ impl Game {
             .any(|&seg| seg == new_head);
 
         if hit_self {
-            self.trigger_game_over();
+            self.game_over = true;
             return;
         }
 
-        // 4. Move & Grow
+        // 4. Movement / Growth
         if eats_food {
             self.snake.push_front(new_head);
             self.score += 1;
@@ -237,17 +243,13 @@ impl Game {
             self.snake.pop_back();
         }
     }
-
-    fn trigger_game_over(&mut self) {
-        self.game_over = true;
-    }
 }
 
 fn main() {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
 
     let window = WindowBuilder::new()
-        .with_title("Snake - Score: 0 | High: 0")
+        .with_title("Snake Game AI Platform - Score: 0")
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
         .with_resizable(false)
         .build(&event_loop)
@@ -271,10 +273,7 @@ fn main() {
                 WindowEvent::CloseRequested => elwt.exit(),
 
                 WindowEvent::Resized(new_size) => {
-                    if let Err(err) = pixels.resize_surface(new_size.width, new_size.height) {
-                        eprintln!("Resize surface failed: {err}");
-                        elwt.exit();
-                    }
+                    let _ = pixels.resize_surface(new_size.width, new_size.height);
                 }
 
                 WindowEvent::KeyboardInput {
@@ -311,20 +310,17 @@ fn main() {
                             game.reset();
                             last_tick = Instant::now();
                             window.set_title(&format!(
-                                "Snake - Score: {} | High: {}",
+                                "Snake AI Platform - Score: {} | Best: {}",
                                 game.score, game.high_score
                             ));
                         }
                     }
-                    KeyCode::Escape => {
-                        elwt.exit();
-                    }
+                    KeyCode::Escape => elwt.exit(),
                     _ => (),
                 },
 
                 WindowEvent::RedrawRequested => {
                     draw_game(pixels.frame_mut(), &game);
-
                     if let Err(err) = pixels.render() {
                         eprintln!("pixels.render failed: {err}");
                         elwt.exit();
@@ -342,12 +338,12 @@ fn main() {
 
                         if game.game_over {
                             window.set_title(&format!(
-                                "GAME OVER! Score: {} | High: {} - Press SPACE to Restart",
+                                "GAME OVER! Score: {} | Best: {} [SPACE to Restart]",
                                 game.score, game.high_score
                             ));
                         } else {
                             window.set_title(&format!(
-                                "Snake - Score: {} | High: {}",
+                                "Snake AI Platform - Score: {} | Best: {}",
                                 game.score, game.high_score
                             ));
                         }
@@ -362,7 +358,6 @@ fn main() {
     });
 }
 
-/// Fills a block of `CELL_SIZE x CELL_SIZE` pixels on the 240x240 frame
 fn draw_cell(frame: &mut [u8], cx: u32, cy: u32, color: [u8; 4]) {
     let start_x = cx * CELL_SIZE;
     let start_y = cy * CELL_SIZE;
@@ -383,32 +378,32 @@ fn draw_game(frame: &mut [u8], game: &Game) {
         for cx in 0..COLS {
             let color = if cx == 0 || cx == COLS - 1 || cy == 0 || cy == ROWS - 1 {
                 if game.game_over {
-                    [231, 76, 60, 255] // Red border on game over
+                    COLOR_BORDER_DEAD
                 } else {
-                    [160, 160, 160, 255] // Gray border
+                    COLOR_BORDER_NORMAL
                 }
             } else {
-                [24, 26, 32, 255] // Dark background
+                COLOR_BG
             };
             draw_cell(frame, cx, cy, color);
         }
     }
 
-    // 2. Draw Random Obstacles (Amber / Orange)
+    // 2. Obstacles
     for obstacle in &game.obstacles {
-        draw_cell(frame, obstacle.x, obstacle.y, [243, 156, 18, 255]);
+        draw_cell(frame, obstacle.x, obstacle.y, COLOR_OBSTACLE);
     }
 
-    // 3. Draw Food (Red Apple)
+    // 3. Apple / Food
     if !game.game_over {
-        draw_cell(frame, game.food.x, game.food.y, [231, 76, 60, 255]);
+        draw_cell(frame, game.food.x, game.food.y, COLOR_FOOD);
     }
 
-    // 4. Draw Snake
+    // 4. Snake
     let (head_color, body_color) = if game.game_over {
-        ([180, 50, 50, 255], [120, 35, 35, 255])
+        (COLOR_SNAKE_DEAD, COLOR_SNAKE_DEAD)
     } else {
-        ([46, 204, 113, 255], [39, 174, 96, 255])
+        (COLOR_SNAKE_HEAD, COLOR_SNAKE_BODY)
     };
 
     for segment in game.snake.iter().skip(1) {
