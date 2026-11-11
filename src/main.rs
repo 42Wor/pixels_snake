@@ -1,4 +1,5 @@
 use pixels::{Pixels, SurfaceTexture};
+use rand::Rng;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use winit::dpi::LogicalSize;
@@ -11,7 +12,7 @@ const GRID_WIDTH: u32 = 24;
 const GRID_HEIGHT: u32 = 24;
 const WINDOW_WIDTH: f64 = 600.0;
 const WINDOW_HEIGHT: f64 = 600.0;
-const TICK_RATE: Duration = Duration::from_millis(120);
+const TICK_RATE: Duration = Duration::from_millis(110);
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct Point {
@@ -47,11 +48,27 @@ impl Direction {
     }
 }
 
+/// Spawns an apple on a random tile not occupied by the snake
+fn spawn_food(snake: &VecDeque<Point>) -> Point {
+    let mut rng = rand::thread_rng();
+    loop {
+        let candidate = Point {
+            x: rng.gen_range(1..GRID_WIDTH - 1),
+            y: rng.gen_range(1..GRID_HEIGHT - 1),
+        };
+
+        // Ensure the food doesn't spawn inside the snake's body
+        if !snake.contains(&candidate) {
+            return candidate;
+        }
+    }
+}
+
 fn main() {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
 
     let window = WindowBuilder::new()
-        .with_title("Snake - Milestone 4: Multi-segment Body")
+        .with_title("Snake - Score: 0")
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
         .with_resizable(false)
         .build(&event_loop)
@@ -64,8 +81,7 @@ fn main() {
             .expect("Failed to initialize pixels surface")
     };
 
-    // --- State: Snake Body (VecDeque) ---
-    // Start with 4 segments moving to the right
+    // --- State: Snake Body ---
     let mut snake: VecDeque<Point> = VecDeque::new();
     let start_x = GRID_WIDTH / 2;
     let start_y = GRID_HEIGHT / 2;
@@ -73,21 +89,21 @@ fn main() {
     snake.push_back(Point {
         x: start_x,
         y: start_y,
-    }); // Head (front)
+    });
     snake.push_back(Point {
         x: start_x - 1,
         y: start_y,
-    }); // Body
+    });
     snake.push_back(Point {
         x: start_x - 2,
         y: start_y,
-    }); // Body
-    snake.push_back(Point {
-        x: start_x - 3,
-        y: start_y,
-    }); // Tail (back)
+    });
 
-    // --- State: Directions & Timer ---
+    // --- State: Food & Score ---
+    let mut food = spawn_food(&snake);
+    let mut score: u32 = 0;
+
+    // --- State: Direction & Timer ---
     let mut current_dir = Direction::Right;
     let mut next_dir = Direction::Right;
     let mut last_tick = Instant::now();
@@ -135,7 +151,7 @@ fn main() {
                 }
 
                 WindowEvent::RedrawRequested => {
-                    draw_game(pixels.frame_mut(), &snake);
+                    draw_game(pixels.frame_mut(), &snake, &food);
 
                     if let Err(err) = pixels.render() {
                         eprintln!("pixels.render failed: {err}");
@@ -150,7 +166,7 @@ fn main() {
                     last_tick = Instant::now();
                     current_dir = next_dir;
 
-                    // 1. Calculate new head position from current head
+                    // 1. Calculate new head position
                     let head = *snake.front().expect("Snake has no head");
                     let (dx, dy) = current_dir.delta();
                     let mut new_x = head.x as i32 + dx;
@@ -174,9 +190,18 @@ fn main() {
                         y: new_y as u32,
                     };
 
-                    // 2. Advance snake: add new head, remove tail
-                    snake.push_front(new_head);
-                    snake.pop_back();
+                    // 2. Growth logic: check if the new head touches the food
+                    if new_head == food {
+                        // Grow: add new head, KEEP the tail
+                        snake.push_front(new_head);
+                        score += 1;
+                        food = spawn_food(&snake);
+                        window.set_title(&format!("Snake - Score: {score}"));
+                    } else {
+                        // Normal move: add new head, drop tail
+                        snake.push_front(new_head);
+                        snake.pop_back();
+                    }
 
                     window.request_redraw();
                 }
@@ -187,31 +212,33 @@ fn main() {
     });
 }
 
-/// Helper to set RGBA color of a single tile
 fn set_pixel(frame: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
     let index = ((y * GRID_WIDTH + x) * 4) as usize;
     frame[index..index + 4].copy_from_slice(&color);
 }
 
-fn draw_game(frame: &mut [u8], snake: &VecDeque<Point>) {
-    // 1. Fill background and border
+fn draw_game(frame: &mut [u8], snake: &VecDeque<Point>, food: &Point) {
+    // 1. Background and Border
     for y in 0..GRID_HEIGHT {
         for x in 0..GRID_WIDTH {
             let color = if x == 0 || x == GRID_WIDTH - 1 || y == 0 || y == GRID_HEIGHT - 1 {
-                [160, 160, 160, 255] // Border
+                [160, 160, 160, 255] // Gray border
             } else {
-                [24, 26, 32, 255] // Background
+                [24, 26, 32, 255] // Dark slate background
             };
             set_pixel(frame, x, y, color);
         }
     }
 
-    // 2. Draw Snake body segments (medium green)
+    // 2. Food (Bright Red Apple)
+    set_pixel(frame, food.x, food.y, [231, 76, 60, 255]);
+
+    // 3. Snake Body (Dark Green)
     for segment in snake.iter().skip(1) {
         set_pixel(frame, segment.x, segment.y, [39, 174, 96, 255]);
     }
 
-    // 3. Draw Snake head (bright neon green)
+    // 4. Snake Head (Bright Green)
     if let Some(head) = snake.front() {
         set_pixel(frame, head.x, head.y, [46, 204, 113, 255]);
     }
