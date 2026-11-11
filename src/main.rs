@@ -98,10 +98,13 @@ struct StepCommand {
 
 #[derive(Serialize, Debug)]
 struct StepResponse {
-    state: Vec<f32>,
-    reward: f32,
-    done: bool,
+    head: [u32; 2],
+    food: [u32; 2],
+    snake: Vec<[u32; 2]>,
+    obstacles: Vec<[u32; 2]>,
+    dir: String,
     score: u32,
+    done: bool,
 }
 
 struct Game {
@@ -538,12 +541,16 @@ fn main() {
                                     game.reset();
                                 }
 
-                                let reward = game.step(cmd.action);
+                                let _reward = game.step(cmd.action);
+                                let head = *game.snake.front().unwrap();
                                 let response = StepResponse {
-                                    state: game.get_state(),
-                                    reward,
-                                    done: game.game_over,
+                                    head: [head.x, head.y],
+                                    food: [game.food.x, game.food.y],
+                                    snake: game.snake.iter().map(|p| [p.x, p.y]).collect(),
+                                    obstacles: game.obstacles.iter().map(|p| [p.x, p.y]).collect(),
+                                    dir: format!("{:?}", game.current_dir),
                                     score: game.score,
+                                    done: game.game_over,
                                 };
 
                                 let resp_json = serde_json::to_string(&response).unwrap() + "\n";
