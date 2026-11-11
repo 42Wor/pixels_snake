@@ -1,6 +1,9 @@
 use pixels::{Pixels, SurfaceTexture};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, KeyEvent, WindowEvent};
@@ -13,24 +16,23 @@ const GRID_WIDTH: u32 = 240;
 const GRID_HEIGHT: u32 = 240;
 const WINDOW_WIDTH: f64 = 600.0;
 const WINDOW_HEIGHT: f64 = 600.0;
-const TICK_RATE: Duration = Duration::from_millis(90);
+const HUMAN_TICK_RATE: Duration = Duration::from_millis(90);
+const WATCH_TICK_RATE: Duration = Duration::from_millis(80);
 
-// Size of each grid cell (4 = 60x60 grid)
 const CELL_SIZE: u32 = 4;
 const COLS: u32 = GRID_WIDTH / CELL_SIZE;
 const ROWS: u32 = GRID_HEIGHT / CELL_SIZE;
-
 const NUM_OBSTACLES: usize = 25;
 
-// --- Color Palette (RGBA) ---
-const COLOR_BG: [u8; 4] = [18, 20, 26, 255]; // Deep dark navy
-const COLOR_BORDER_NORMAL: [u8; 4] = [120, 125, 140, 255]; // Cool slate border
-const COLOR_BORDER_DEAD: [u8; 4] = [235, 77, 75, 255]; // Crimson red on death
-const COLOR_OBSTACLE: [u8; 4] = [108, 92, 231, 255]; // Electric Indigo / Slate Blue
-const COLOR_FOOD: [u8; 4] = [255, 71, 87, 255]; // Bright Coral Apple
-const COLOR_SNAKE_HEAD: [u8; 4] = [46, 213, 115, 255]; // Neon Mint Green
-const COLOR_SNAKE_BODY: [u8; 4] = [38, 166, 91, 255]; // Forest Green
-const COLOR_SNAKE_DEAD: [u8; 4] = [140, 45, 45, 255]; // Dim Red
+// --- Colors ---
+const COLOR_BG: [u8; 4] = [18, 20, 26, 255];
+const COLOR_BORDER_NORMAL: [u8; 4] = [120, 125, 140, 255];
+const COLOR_BORDER_DEAD: [u8; 4] = [235, 77, 75, 255];
+const COLOR_OBSTACLE: [u8; 4] = [108, 92, 231, 255];
+const COLOR_FOOD: [u8; 4] = [255, 71, 87, 255];
+const COLOR_SNAKE_HEAD: [u8; 4] = [46, 213, 115, 255];
+const COLOR_SNAKE_BODY: [u8; 4] = [38, 166, 91, 255];
+const COLOR_SNAKE_DEAD: [u8; 4] = [140, 45, 45, 255];
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 struct Point {
@@ -47,15 +49,6 @@ enum Direction {
 }
 
 impl Direction {
-    fn opposite(self) -> Self {
-        match self {
-            Direction::Up => Direction::Down,
-            Direction::Down => Direction::Up,
-            Direction::Left => Direction::Right,
-            Direction::Right => Direction::Left,
-        }
-    }
-
     fn delta(self) -> (i32, i32) {
         match self {
             Direction::Up => (0, -1),
@@ -64,6 +57,40 @@ impl Direction {
             Direction::Right => (1, 0),
         }
     }
+
+    fn turn_right(self) -> Self {
+        match self {
+            Direction::Up => Direction::Right,
+            Direction::Right => Direction::Down,
+            Direction::Down => Direction::Left,
+            Direction::Left => Direction::Up,
+        }
+    }
+
+    fn turn_left(self) -> Self {
+        match self {
+            Direction::Up => Direction::Left,
+            Direction::Left => Direction::Down,
+            Direction::Down => Direction::Right,
+            Direction::Right => Direction::Up,
+        }
+    }
+}
+
+// --- IPC Communication Protocols ---
+#[derive(Deserialize, Debug)]
+struct StepCommand {
+    action: u8,   // 0: Straight, 1: Turn Right, 2: Turn Left
+    render: bool, // true: update window, false: turbo mode
+    reset: bool,  // true: restart game
+}
+
+#[derive(Serialize, Debug)]
+struct StepResponse {
+    state: Vec<f32>,
+    reward: f32,
+    done: bool,
+    score: u32,
 }
 
 struct Game {
@@ -71,7 +98,6 @@ struct Game {
     food: Point,
     obstacles: Vec<Point>,
     current_dir: Direction,
-    next_dir: Direction,
     score: u32,
     high_score: u32,
     game_over: bool,
@@ -104,7 +130,6 @@ impl Game {
             food,
             obstacles,
             current_dir: Direction::Right,
-            next_dir: Direction::Right,
             score: 0,
             high_score: 0,
             game_over: false,
@@ -129,12 +154,10 @@ impl Game {
             y: start_y,
         });
 
-        // Brand new obstacles on every restart
         self.obstacles = Self::generate_obstacles(&self.snake);
         self.food = Self::spawn_food(&self.snake, &self.obstacles);
 
         self.current_dir = Direction::Right;
-        self.next_dir = Direction::Right;
         self.score = 0;
         self.game_over = false;
     }
@@ -154,7 +177,6 @@ impl Game {
                 continue;
             }
 
-            // Safe runway for snake spawn
             let dist_x = (candidate.x as i32 - head.x as i32).abs();
             let dist_y = (candidate.y as i32 - head.y as i32).abs();
             if dist_x <= 5 && dist_y <= 3 {
@@ -163,7 +185,6 @@ impl Game {
 
             obstacles.push(candidate);
         }
-
         obstacles
     }
 
@@ -181,23 +202,39 @@ impl Game {
         }
     }
 
-    fn tick(&mut self) {
+    fn is_collision(&self, x: i32, y: i32) -> bool {
+        if x <= 0 || x >= (COLS as i32 - 1) || y <= 0 || y >= (ROWS as i32 - 1) {
+            return true;
+        }
+        let pt = Point {
+            x: x as u32,
+            y: y as u32,
+        };
+        self.obstacles.contains(&pt) || self.snake.contains(&pt)
+    }
+
+    /// Advances game one step from AI action and returns step reward
+    fn step(&mut self, action: u8) -> f32 {
         if self.game_over {
-            return;
+            return -10.0;
         }
 
-        self.current_dir = self.next_dir;
-        let head = *self.snake.front().expect("Snake has no head");
-        let (dx, dy) = self.current_dir.delta();
+        // Action steering: 0 = straight, 1 = right, 2 = left
+        self.current_dir = match action {
+            1 => self.current_dir.turn_right(),
+            2 => self.current_dir.turn_left(),
+            _ => self.current_dir,
+        };
 
+        let head = *self.snake.front().unwrap();
+        let (dx, dy) = self.current_dir.delta();
         let next_x = head.x as i32 + dx;
         let next_y = head.y as i32 + dy;
 
-        // 1. Wall Collision
-        if next_x <= 0 || next_x >= (COLS as i32 - 1) || next_y <= 0 || next_y >= (ROWS as i32 - 1)
-        {
+        // Collision Check
+        if self.is_collision(next_x, next_y) {
             self.game_over = true;
-            return;
+            return -10.0;
         }
 
         let new_head = Point {
@@ -205,51 +242,116 @@ impl Game {
             y: next_y as u32,
         };
 
-        // 2. Obstacle Collision
-        if self.obstacles.contains(&new_head) {
-            self.game_over = true;
-            return;
-        }
-
-        // 3. Self Collision
-        let eats_food = new_head == self.food;
-        let body_to_check = if eats_food {
-            self.snake.len()
-        } else {
-            self.snake.len() - 1
-        };
-
-        let hit_self = self
-            .snake
-            .iter()
-            .take(body_to_check)
-            .any(|&seg| seg == new_head);
-
-        if hit_self {
-            self.game_over = true;
-            return;
-        }
-
-        // 4. Movement / Growth
-        if eats_food {
+        // Food Check
+        if new_head == self.food {
             self.snake.push_front(new_head);
             self.score += 1;
             if self.score > self.high_score {
                 self.high_score = self.score;
             }
             self.food = Self::spawn_food(&self.snake, &self.obstacles);
+            10.0 // Positive reward
         } else {
             self.snake.push_front(new_head);
             self.snake.pop_back();
+            -0.01 // Tiny step penalty to incentivize finding food quickly
         }
     }
+
+    /// Builds the 11-feature state vector for reinforcement learning
+    fn get_state(&self) -> Vec<f32> {
+        let head = *self.snake.front().unwrap();
+
+        let straight_dir = self.current_dir;
+        let right_dir = self.current_dir.turn_right();
+        let left_dir = self.current_dir.turn_left();
+
+        let pt_straight = (
+            head.x as i32 + straight_dir.delta().0,
+            head.y as i32 + straight_dir.delta().1,
+        );
+        let pt_right = (
+            head.x as i32 + right_dir.delta().0,
+            head.y as i32 + right_dir.delta().1,
+        );
+        let pt_left = (
+            head.x as i32 + left_dir.delta().0,
+            head.y as i32 + left_dir.delta().1,
+        );
+
+        vec![
+            // Danger straight, right, left (1.0 or 0.0)
+            if self.is_collision(pt_straight.0, pt_straight.1) {
+                1.0
+            } else {
+                0.0
+            },
+            if self.is_collision(pt_right.0, pt_right.1) {
+                1.0
+            } else {
+                0.0
+            },
+            if self.is_collision(pt_left.0, pt_left.1) {
+                1.0
+            } else {
+                0.0
+            },
+            // Current Direction
+            if self.current_dir == Direction::Up {
+                1.0
+            } else {
+                0.0
+            },
+            if self.current_dir == Direction::Down {
+                1.0
+            } else {
+                0.0
+            },
+            if self.current_dir == Direction::Left {
+                1.0
+            } else {
+                0.0
+            },
+            if self.current_dir == Direction::Right {
+                1.0
+            } else {
+                0.0
+            },
+            // Food relative position
+            if (self.food.y as i32) < (head.y as i32) {
+                1.0
+            } else {
+                0.0
+            }, // Food is Up
+            if (self.food.y as i32) > (head.y as i32) {
+                1.0
+            } else {
+                0.0
+            }, // Food is Down
+            if (self.food.x as i32) < (head.x as i32) {
+                1.0
+            } else {
+                0.0
+            }, // Food is Left
+            if (self.food.x as i32) > (head.x as i32) {
+                1.0
+            } else {
+                0.0
+            }, // Food is Right
+        ]
+    }
+}
+
+struct ClientSession {
+    reader: BufReader<TcpStream>,
+    writer: TcpStream,
 }
 
 fn main() {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
 
     let window = WindowBuilder::new()
-        .with_title("Snake Game AI Platform - Score: 0")
+        .with_title("Snake Game - Human Mode (Listening on 127.0.0.1:9999 for Python)")
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
         .with_resizable(false)
         .build(&event_loop)
@@ -262,8 +364,19 @@ fn main() {
             .expect("Failed to initialize pixels surface")
     };
 
+    let listener = TcpListener::bind("127.0.0.1:9999").expect("Failed to bind port 9999");
+    listener
+        .set_nonblocking(true)
+        .expect("Cannot set non-blocking");
+
+    let mut client: Option<ClientSession> = None;
     let mut game = Game::new();
     let mut last_tick = Instant::now();
+
+    println!("======================================================");
+    println!(" Rust Snake Server running on 127.0.0.1:9999");
+    println!(" Play manually OR run your python agent script!");
+    println!("======================================================");
 
     let _ = event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
@@ -276,6 +389,7 @@ fn main() {
                     let _ = pixels.resize_surface(new_size.width, new_size.height);
                 }
 
+                // Keyboard controls (only active when Python is NOT connected)
                 WindowEvent::KeyboardInput {
                     event:
                         KeyEvent {
@@ -284,45 +398,44 @@ fn main() {
                             ..
                         },
                     ..
-                } => match key_code {
-                    KeyCode::ArrowUp | KeyCode::KeyW => {
-                        if game.current_dir != Direction::Down {
-                            game.next_dir = Direction::Up;
+                } => {
+                    if client.is_none() {
+                        match key_code {
+                            KeyCode::ArrowUp | KeyCode::KeyW => {
+                                if game.current_dir != Direction::Down {
+                                    game.current_dir = Direction::Up;
+                                }
+                            }
+                            KeyCode::ArrowDown | KeyCode::KeyS => {
+                                if game.current_dir != Direction::Up {
+                                    game.current_dir = Direction::Down;
+                                }
+                            }
+                            KeyCode::ArrowLeft | KeyCode::KeyA => {
+                                if game.current_dir != Direction::Right {
+                                    game.current_dir = Direction::Left;
+                                }
+                            }
+                            KeyCode::ArrowRight | KeyCode::KeyD => {
+                                if game.current_dir != Direction::Left {
+                                    game.current_dir = Direction::Right;
+                                }
+                            }
+                            KeyCode::Space | KeyCode::KeyR => {
+                                if game.game_over {
+                                    game.reset();
+                                }
+                            }
+                            KeyCode::Escape => elwt.exit(),
+                            _ => (),
                         }
                     }
-                    KeyCode::ArrowDown | KeyCode::KeyS => {
-                        if game.current_dir != Direction::Up {
-                            game.next_dir = Direction::Down;
-                        }
-                    }
-                    KeyCode::ArrowLeft | KeyCode::KeyA => {
-                        if game.current_dir != Direction::Right {
-                            game.next_dir = Direction::Left;
-                        }
-                    }
-                    KeyCode::ArrowRight | KeyCode::KeyD => {
-                        if game.current_dir != Direction::Left {
-                            game.next_dir = Direction::Right;
-                        }
-                    }
-                    KeyCode::Space | KeyCode::KeyR => {
-                        if game.game_over {
-                            game.reset();
-                            last_tick = Instant::now();
-                            window.set_title(&format!(
-                                "Snake AI Platform - Score: {} | Best: {}",
-                                game.score, game.high_score
-                            ));
-                        }
-                    }
-                    KeyCode::Escape => elwt.exit(),
-                    _ => (),
-                },
+                }
 
                 WindowEvent::RedrawRequested => {
                     draw_game(pixels.frame_mut(), &game);
                     if let Err(err) = pixels.render() {
-                        eprintln!("pixels.render failed: {err}");
+                        eprintln!("Render error: {err}");
                         elwt.exit();
                     }
                 }
@@ -330,26 +443,71 @@ fn main() {
             },
 
             Event::AboutToWait => {
-                if last_tick.elapsed() >= TICK_RATE {
-                    last_tick = Instant::now();
+                // 1. Check for incoming Python connections
+                if client.is_none() {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            let writer = stream.try_clone().unwrap();
+                            stream.set_nonblocking(false).unwrap();
+                            client = Some(ClientSession {
+                                reader: BufReader::new(stream),
+                                writer,
+                            });
+                            window.set_title("Snake Game - [AI Python Agent Active]");
+                            println!("[INFO] Python Agent Connected!");
+                        }
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => (),
+                        Err(err) => eprintln!("TCP Accept error: {err}"),
+                    }
+                }
 
-                    if !game.game_over {
-                        game.tick();
+                // 2. AI Mode (Python is Driving)
+                if let Some(ref mut session) = client {
+                    let mut line = String::new();
+                    match session.reader.read_line(&mut line) {
+                        Ok(0) => {
+                            println!("[INFO] Python disconnected. Returning to manual mode.");
+                            client = None;
+                            window.set_title("Snake Game - Human Mode (Listening on :9999)");
+                        }
+                        Ok(_) => {
+                            if let Ok(cmd) = serde_json::from_str::<StepCommand>(&line) {
+                                if cmd.reset {
+                                    game.reset();
+                                }
 
-                        if game.game_over {
-                            window.set_title(&format!(
-                                "GAME OVER! Score: {} | Best: {} [SPACE to Restart]",
-                                game.score, game.high_score
-                            ));
-                        } else {
-                            window.set_title(&format!(
-                                "Snake AI Platform - Score: {} | Best: {}",
-                                game.score, game.high_score
-                            ));
+                                let reward = game.step(cmd.action);
+                                let response = StepResponse {
+                                    state: game.get_state(),
+                                    reward,
+                                    done: game.game_over,
+                                    score: game.score,
+                                };
+
+                                let resp_json = serde_json::to_string(&response).unwrap() + "\n";
+                                let _ = session.writer.write_all(resp_json.as_bytes());
+
+                                // Only render if requested by Python (Watch Mode)
+                                if cmd.render {
+                                    window.request_redraw();
+                                    std::thread::sleep(WATCH_TICK_RATE);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Error reading from Python: {e}");
+                            client = None;
                         }
                     }
-
-                    window.request_redraw();
+                } else {
+                    // 3. Human Mode
+                    if last_tick.elapsed() >= HUMAN_TICK_RATE {
+                        last_tick = Instant::now();
+                        if !game.game_over {
+                            game.step(0); // Move straight
+                        }
+                        window.request_redraw();
+                    }
                 }
             }
 
@@ -373,7 +531,6 @@ fn draw_cell(frame: &mut [u8], cx: u32, cy: u32, color: [u8; 4]) {
 }
 
 fn draw_game(frame: &mut [u8], game: &Game) {
-    // 1. Background & Border
     for cy in 0..ROWS {
         for cx in 0..COLS {
             let color = if cx == 0 || cx == COLS - 1 || cy == 0 || cy == ROWS - 1 {
@@ -389,17 +546,14 @@ fn draw_game(frame: &mut [u8], game: &Game) {
         }
     }
 
-    // 2. Obstacles
     for obstacle in &game.obstacles {
         draw_cell(frame, obstacle.x, obstacle.y, COLOR_OBSTACLE);
     }
 
-    // 3. Apple / Food
     if !game.game_over {
         draw_cell(frame, game.food.x, game.food.y, COLOR_FOOD);
     }
 
-    // 4. Snake
     let (head_color, body_color) = if game.game_over {
         (COLOR_SNAKE_DEAD, COLOR_SNAKE_DEAD)
     } else {
