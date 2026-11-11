@@ -145,7 +145,7 @@ if __name__ == "__main__":
     while True:
         if data["done"]:
             print(f"Round finished! Final Score: {data['score']}. Restarting...")
-            time.sleep(1.0)
+            time.sleep(0.1)
             data = env.reset()
 
         head = tuple(data["head"])

@@ -20,7 +20,7 @@ const WINDOW_WIDTH: f64 = 600.0;
 const WINDOW_HEIGHT: f64 = 660.0; // 600 x 660 preserves exact 240x264 aspect ratio
 
 const HUMAN_TICK_RATE: Duration = Duration::from_millis(90);
-const WATCH_TICK_RATE: Duration = Duration::from_millis(80);
+const WATCH_TICK_RATE: Duration = Duration::from_millis(10);
 
 const CELL_SIZE: u32 = 4;
 const COLS: u32 = CANVAS_WIDTH / CELL_SIZE; // 60 columns
