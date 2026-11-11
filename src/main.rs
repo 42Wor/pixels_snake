@@ -1,23 +1,52 @@
 use pixels::{Pixels, SurfaceTexture};
 use std::time::{Duration, Instant};
 use winit::dpi::LogicalSize;
-use winit::event::{Event, WindowEvent};
+use winit::event::{ElementState, Event, KeyEvent, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowBuilder;
 
 const GRID_WIDTH: u32 = 24;
 const GRID_HEIGHT: u32 = 24;
 const WINDOW_WIDTH: f64 = 600.0;
 const WINDOW_HEIGHT: f64 = 600.0;
-
-// The game advances one tile every 120 ms
 const TICK_RATE: Duration = Duration::from_millis(120);
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl Direction {
+    /// Returns the exact opposite direction.
+    fn opposite(self) -> Self {
+        match self {
+            Direction::Up => Direction::Down,
+            Direction::Down => Direction::Up,
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+        }
+    }
+
+    /// Returns the coordinate offset (dx, dy).
+    fn delta(self) -> (i32, i32) {
+        match self {
+            Direction::Up => (0, -1),
+            Direction::Down => (0, 1),
+            Direction::Left => (-1, 0),
+            Direction::Right => (1, 0),
+        }
+    }
+}
 
 fn main() {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
 
     let window = WindowBuilder::new()
-        .with_title("Snake - Milestone 2: Moving Dot")
+        .with_title("Snake - Milestone 3: Input Control")
         .with_inner_size(LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))
         .with_resizable(false)
         .build(&event_loop)
@@ -30,14 +59,15 @@ fn main() {
             .expect("Failed to initialize pixels surface")
     };
 
-    // --- State: Dot Position & Direction ---
-    let mut dot_x: u32 = 1;
+    // --- State: Dot Position ---
+    let mut dot_x: u32 = GRID_WIDTH / 2;
     let mut dot_y: u32 = GRID_HEIGHT / 2;
 
-    let dir_x: i32 = 1; // 1 = moving right
-    let dir_y: i32 = 0;
+    // --- State: Directions ---
+    let mut current_dir = Direction::Right;
+    let mut next_dir = Direction::Right;
 
-    // --- State: Timing ---
+    // --- State: Timer ---
     let mut last_tick = Instant::now();
 
     let _ = event_loop.run(move |event, elwt| {
@@ -54,6 +84,36 @@ fn main() {
                     }
                 }
 
+                // Handle keyboard events (WASD, Arrows, Escape)
+                WindowEvent::KeyboardInput {
+                    event:
+                        KeyEvent {
+                            state: ElementState::Pressed,
+                            physical_key: PhysicalKey::Code(key_code),
+                            ..
+                        },
+                    ..
+                } => {
+                    let requested_dir = match key_code {
+                        KeyCode::ArrowUp | KeyCode::KeyW => Some(Direction::Up),
+                        KeyCode::ArrowDown | KeyCode::KeyS => Some(Direction::Down),
+                        KeyCode::ArrowLeft | KeyCode::KeyA => Some(Direction::Left),
+                        KeyCode::ArrowRight | KeyCode::KeyD => Some(Direction::Right),
+                        KeyCode::Escape => {
+                            elwt.exit();
+                            None
+                        }
+                        _ => None,
+                    };
+
+                    // Prevent reversing directly onto itself
+                    if let Some(dir) = requested_dir {
+                        if dir != current_dir.opposite() {
+                            next_dir = dir;
+                        }
+                    }
+                }
+
                 WindowEvent::RedrawRequested => {
                     draw_grid(pixels.frame_mut(), dot_x, dot_y);
 
@@ -66,20 +126,33 @@ fn main() {
             },
 
             Event::AboutToWait => {
-                // Check if enough time has passed to advance the game
                 if last_tick.elapsed() >= TICK_RATE {
                     last_tick = Instant::now();
 
-                    // Advance position
-                    dot_x = (dot_x as i32 + dir_x) as u32;
-                    dot_y = (dot_y as i32 + dir_y) as u32;
+                    // Apply the confirmed direction for this tick
+                    current_dir = next_dir;
 
-                    // Temporary boundary wrap: if it reaches the right wall, loop back to x=1
-                    if dot_x >= GRID_WIDTH - 1 {
-                        dot_x = 1;
+                    // Calculate new coordinates
+                    let (dx, dy) = current_dir.delta();
+                    let mut new_x = dot_x as i32 + dx;
+                    let mut new_y = dot_y as i32 + dy;
+
+                    // Temporary boundary wrapping within the walls (1 ..= GRID - 2)
+                    if new_x < 1 {
+                        new_x = GRID_WIDTH as i32 - 2;
+                    } else if new_x > (GRID_WIDTH as i32 - 2) {
+                        new_x = 1;
                     }
 
-                    // Trigger a redraw since coordinates changed
+                    if new_y < 1 {
+                        new_y = GRID_HEIGHT as i32 - 2;
+                    } else if new_y > (GRID_HEIGHT as i32 - 2) {
+                        new_y = 1;
+                    }
+
+                    dot_x = new_x as u32;
+                    dot_y = new_y as u32;
+
                     window.request_redraw();
                 }
             }
@@ -95,10 +168,10 @@ fn draw_grid(frame: &mut [u8], dot_x: u32, dot_y: u32) {
             let index = ((y * GRID_WIDTH + x) * 4) as usize;
 
             let color = if x == 0 || x == GRID_WIDTH - 1 || y == 0 || y == GRID_HEIGHT - 1 {
-                // Wall Border: Light Gray
+                // Border walls
                 [160, 160, 160, 255]
             } else if x == dot_x && y == dot_y {
-                // Moving Dot: Green
+                // Controlled Dot
                 [46, 204, 113, 255]
             } else {
                 // Background
