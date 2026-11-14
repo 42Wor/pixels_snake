@@ -142,10 +142,26 @@ if __name__ == "__main__":
 
     print("Pathfinding Agent active! Watch the snake navigate around obstacles...")
 
+    round_num = 1
+
     while True:
+        # --- Handle Death / Game Over ---
         if data["done"]:
-            print(f"Round finished! Final Score: {data['score']}. Restarting...")
-            time.sleep(0.1)
+            print(f"\n{'='*50}")
+            print(f" GAME OVER — Round {round_num}")
+            print(f" Final Score: {data['score']}")
+            print(f"{'='*50}")
+
+            # PAUSE HERE: The window will stay frozen showing the red Game Over screen.
+            # Press ENTER to run the next round, or press Ctrl+C to stop.
+            try:
+                input("\n>>> Press [ENTER] to start the next round (or Ctrl+C to quit)... ")
+            except KeyboardInterrupt:
+                print("\nExiting. Good game!")
+                break
+
+            round_num += 1
+            print(f"\nStarting Round {round_num}...")
             data = env.reset()
 
         head = tuple(data["head"])
@@ -154,19 +170,21 @@ if __name__ == "__main__":
         snake = [tuple(p) for p in data["snake"]]
         current_dir = data["dir"]
 
-        # 1. Run A* Search to find the shortest route to the apple
+        # 1. Run A* Search
         path = a_star_search(head, food, obstacles, snake)
 
         if path and len(path) > 0:
             next_tile = path[0]
         else:
-            # Fallback survival move if the apple is temporarily boxed in
+            # Fallback survival move if trapped
             next_tile = pick_survival_move(head, obstacles, snake)
             if not next_tile:
-                next_tile = head  # unavoidable collision
+                next_tile = head
 
-        # 2. Convert coordinate to relative steering
+        # 2. Convert coordinate to action
         action = to_relative_action(current_dir, next_tile, head)
 
-        # 3. Step forward and render
+        # 3. Step forward and render to screen
         data = env.step(action, render=True)
+
+    env.close()
